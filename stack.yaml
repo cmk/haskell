@@ -5,7 +5,6 @@ packages:
 - tensorflow-core-ops
 - tensorflow-logging
 - tensorflow-opgen
-- tensorflow-ops
 - tensorflow-proto
 - tensorflow-mnist
 - tensorflow-mnist-input-data
