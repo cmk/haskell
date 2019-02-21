@@ -4,17 +4,7 @@ with-compiler: ghc-8.4.4
 
 packages:
     tensorflow/
-  , tensorflow-core-ops/
-  , tensorflow-logging/
-  , tensorflow-opgen/
-  , tensorflow-ops/
   , tensorflow-proto/
-  , tensorflow-mnist/
-  , tensorflow-mnist-input-data/
-  , tensorflow-records/
-  , tensorflow-records-conduit/
-  , tensorflow-test/
-
 
 allow-older: *
 allow-newer: *

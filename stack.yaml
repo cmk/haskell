@@ -5,7 +5,6 @@ packages:
 - tensorflow-core-ops
 - tensorflow-logging
 - tensorflow-opgen
-- tensorflow-ops
 - tensorflow-proto
 - tensorflow-mnist
 - tensorflow-mnist-input-data
@@ -23,7 +22,6 @@ extra-lib-dirs:
     - /usr/local/lib
 extra-include-dirs:
     - /usr/local/include
-
 nix:
     enable: false
     shell-file: shell.nix
