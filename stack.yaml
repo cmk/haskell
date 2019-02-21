@@ -3,7 +3,6 @@ resolver: lts-12.25
 packages:
 - tensorflow
 - tensorflow-core-ops
-- tensorflow-logging
 - tensorflow-opgen
 - tensorflow-proto
 - tensorflow-mnist-input-data
