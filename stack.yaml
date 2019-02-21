@@ -6,7 +6,6 @@ packages:
 - tensorflow-logging
 - tensorflow-opgen
 - tensorflow-proto
-- tensorflow-mnist
 - tensorflow-mnist-input-data
 - tensorflow-records
 - tensorflow-records-conduit
