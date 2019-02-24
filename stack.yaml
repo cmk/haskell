@@ -4,6 +4,7 @@ packages:
 - tensorflow
 - tensorflow-core-ops
 - tensorflow-logging
+- tensorflow-ops
 - tensorflow-opgen
 - tensorflow-proto
 - tensorflow-mnist
