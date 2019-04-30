@@ -91,6 +91,19 @@ import Proto.Tensorflow.Core.Framework.NodeDef_Fields
 
 import TensorFlow.Output
 
+
+import Control.Monad.ST
+import Data.STRef
+
+instance MonadBuild (ST s) where
+  build (BuildT f) = do
+    r <- newSTRef initGraphState
+    rin <- readSTRef r
+    let (a,rout) = runIdentity . runStateT f $ rin
+    writeSTRef r rout
+    return a 
+
+
 newtype Unique = Unique Int
     deriving (Eq, Ord, Enum)
 

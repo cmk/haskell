@@ -27,7 +27,7 @@ import Control.Monad.IO.Class (liftIO)
 import Data.Functor.Identity (Identity(..))
 import Lens.Family2 ((^.), (.~), (^..))
 
-import Control.Monad (replicateM_)   
+import Control.Monad (replicateM_, void)   
 
 import TensorFlow.Build
     ( Build
@@ -39,6 +39,9 @@ import TensorFlow.Build
     , withNameScope
     , opName
     )
+import qualified TensorFlow.Build as B
+import GHC.IO     ( IO(..) )
+
 import TensorFlow.Types (unScalar)
 import TensorFlow.Output (Device(..))
 import TensorFlow.Tensor
@@ -46,8 +49,9 @@ import TensorFlow.Session
     ( run
     , runSession
     , run_
+    , Session
     )
-
+import qualified TensorFlow.Session as S
 import Data.Int (Int8, Int16, Int32, Int64)
 
 import TensorFlow.Gradient (gradients)
@@ -56,6 +60,9 @@ import Data.ProtoLens.TextFormat (showMessage)
 --import Proto.Tensorflow.Core.Framework.Graph (node)
 --import Proto.Tensorflow.Core.Framework.NodeDef (op, input, name)
 
+import Control.Monad.Primitive
+import Control.Monad.ST
+import Data.STRef
 
 import Proto.Tensorflow.Core.Framework.Graph_Fields (node)
 import Proto.Tensorflow.Core.Framework.NodeDef_Fields (op, input, name)
@@ -63,57 +70,124 @@ import Proto.Tensorflow.Core.Framework.NodeDef_Fields (op, input, name)
 import qualified TensorFlow.Minimize as TF
 import qualified TensorFlow.Variable as TF
 
-eval :: TF.Fetchable t a => t -> IO a
-eval = TF.runSession . TF.run
+import Control.Monad.Reader   ( ReaderT, lift )
+import Unsafe.Coerce
+{-
+https://mail.haskell.org/pipermail/haskell/2007-May/019540.html
+
+TODO reimplement functions in https://tensorflow.github.io/haskell/haddock/tensorflow-ops-0.2.0.0/TensorFlow-Variable.html
+to use PrimMonad instead of MonadBuild
 
 
-minusP :: Tensor Build Float -> (Tensor Build Float, Tensor Build Float)
-       -> (Tensor Build Float, Tensor Build Float) 
-       -> (Tensor Build Float, Tensor Build Float)
-minusP eps (a,b) (c,d) = (a-eps*c, b-eps*d)
+instance PrimMonad m => PrimMonad (ReaderT r m) where
+  type PrimState (ReaderT r m) = PrimState m
+  primitive = lift . primitive
 
+-- need one of these
+instance PrimMonad m => MonadBuild m
+instance PrimMonad (SessionT (ST s))
+
+instance PrimMonad m => PrimMonad (ReaderT r m) where
+  type PrimState (ReaderT r m) = PrimState m
+  primitive = lift . primitive
+
+newtype SessionT m a = Session (ReaderT SessionState (BuildT m) a)
+type SST s a = S.SessionT (ST s) a
+
+instance PrimMonad (S.SessionT (ST s)) where
+  type PrimState (S.SessionT (ST s)) = s
+  primitive = lift . primitive . unsafeCoerce 
+
+> :t runIdentity . runBuildT
+runIdentity . runBuildT :: BuildT Identity a -> (a, GraphState)
+
+instance MonadBuild (ST s) where
+  build b = do
+    r <- newSTRef initGraphState
+    rin <- readSTRef r
+    let (a,rout) = runIdentity . runStateT (unsafeCoerce b) $ rin
+    writeSTRef r rout
+    return a 
+
+-}
+
+--newtype Mut a = Mut { unMut :: forall r. ReaderT (STRef r [TF.ControlNode]) (ST r) a } 
+type Mutable s a = ReaderT (STRef s [TF.ControlNode]) (ST s) a 
+
+read' :: (PrimMonad m) => Int -> m Int
+read' = return
+
+foo :: Mutable s Int
+foo = read' 9
+
+--newtype MT s a = MTensor { unMTensor :: forall v. Tensor v a } 
+newtype MT s a = MTensor { unMTensor :: TF.Variable a } 
+type T a = Tensor Build a
+
+type Model p a b = forall z. Reifies z W => BVar z p -> BVar z a -> BVar z b
+
+{-
+
+
+gradientDescent :: a -> [TF.Variable a] -> [TF.Tensor TF.Value a] -> m TF.ControlNode
+-- | Perform one step of the gradient descent algorithm.
+gradientDescent :: TVal -> [Variable TVal] -> [Tensor Value TVal] -> Build ControlNode
+gradientDescent learningRate params grads = TF.withNameScope "gradientDescent" $ do
+
+  let applyGrad param grad = TF.assignAdd param (TF.scalar (-0.1) `TF.mul` grad) -- this in ST
+  TF.group =<< zipWithM applyGrad params grads
+-}
+
+
+freeze :: TF.TensorType a => MT s a -> ST s (T a)
+freeze = return . TF.readValue . unMTensor
+
+(+=) :: TF.TensorType a => MT s a -> T a -> ST s ()
+(+=) (MTensor v) t = void $ TF.assignAdd v t
+
+gradBP2'' :: Model (T Float) (T Float) (T Float) -> MT s Float -> MT s Float -> ST s (T Float, T Float)
+gradBP2'' f a b = do
+  a' <- freeze a
+  b' <- freeze b
+  return $ gradBP2 f a' b'
+
+
+gradBP2' 
+  :: TF.MonadBuild m
+  => (forall s. Reifies s W => BVar s (T Float) -> BVar s (T Float) -> BVar s (T Float))
+  -> [TF.Variable Float] -> m [Tensor Value Float]
+gradBP2' f [a,b] = sequence $ fmap render [c,d]  where (c, d) = gradBP2 f (TF.readValue a) (TF.readValue b)
+
+-- TODO use STRef? http://hackage.haskell.org/package/base-4.3.1.0/docs/Data-STRef.html
+minimize'
+  :: TF.MonadBuild m
+  => (forall s. Reifies s W => BVar s (T Float) -> BVar s (T Float) -> BVar s (T Float))
+  -> [TF.Variable Float] -> m TF.ControlNode -- m ()
+minimize' f params = gradBP2' f params >>= TF.gradientDescent 0.01 params
+
+minimize'' :: Model (T Float) (T Float) (T Float) -> MT s Float -> MT s Float -> ST s ()
+minimize'' f a b = gradBP2'' f a b >>= gradientDesc 0.01 a b
+
+gradientDesc :: Float -> MT s Float -> MT s Float -> (T Float, T Float) -> ST s ()
+gradientDesc = undefined
+
+--minimize' lossyeah :: TF.MonadBuild m => [TF.Variable Float] -> m TF.ControlNode
+
+ones = [1, 1, 1, 1] :: [Float]
+matx = TF.constant [2, 2] ones
+f x y = (constVar matx) `subD` (x `matMulD` y)
+
+lossyeah :: Model (T Float) (T Float) (T Float) 
+lossyeah x y = myMeanD $ squareD $ f x y
+
+fuckyeah :: [TF.Variable Float] -> Session [Tensor Value Float]
+fuckyeah = gradBP2' lossyeah
 
 randomParam :: TF.Shape -> TF.Session (TF.Tensor TF.Value Float)
 randomParam (TF.Shape shape) = TF.truncatedNormal (TF.vector shape)
 
-doN 0 f x = f x
-doN n f x = let x' = f x in doN (n-1) f x'
 
---testMatrix :: IO ()
-testMatrix = do
-  let ones = [1, 1, 1, 1] :: [Float]
-      matx = TF.constant [2, 2] ones
 
-      eps = TF.scalar (0.1 :: Float)
-      f x y = (constVar matx) `subD` (x `matMulD` y)
-      loss x y = myMeanD $ squareD $ f x y
-
-      trainStep (x,y) = minusP eps (x,y) $ gradBP2 loss x y --TODO use control nodes
-      u = TF.constant [2, 1] [0.9, 1.1]
-      v = TF.constant [1, 2] [1.5, 1.1]
-      g = doN 7 trainStep (u,v)
-      
-
-  let graphDef = TF.asGraphDef $ sequence $ render <$> toList g
-      ops = graphDef ^.. node . traverse . name
-      inps = graphDef ^.. node . traverse . input 
-  l <- traverse print $ zip ops inps
-  print $ length l
-
-  (u', v') <- eval g 
-  print $ V.toList (u' :: V.Vector Float)
-  print $ V.toList (v' :: V.Vector Float)
-  print $ ((*) <$> u' <*> v')
-  return ()
-
-type T a = Tensor Build a
-
-gradBP2' 
-  :: (forall s. Reifies s W => BVar s (T Float) -> BVar s (T Float) -> BVar s (T Float))
-  -> [TF.Variable Float] -> Build [Tensor Value Float]
-gradBP2' f [a,b] = sequence $ fmap render [c,d]  where (c, d) = gradBP2 f (TF.readValue a) (TF.readValue b)
--- BVar s (T a)
--- fitMatrix :: Test
 fitMatrix = TF.runSession $ do
   u <- TF.initializedVariable =<< randomParam [2, 1]
   v <- TF.initializedVariable =<< randomParam [1, 2]
@@ -121,7 +195,6 @@ fitMatrix = TF.runSession $ do
       matx = TF.constant [2, 2] ones
 
       --f x y = (constVar matx) `subD` (x `matMulD` y)
-      --loss x y = myMeanD $ squareD $ f x y
       --gradBP2' loss
 
       diff = matx `C.sub` (TF.readValue u `C.matMul` TF.readValue v)
@@ -130,10 +203,11 @@ fitMatrix = TF.runSession $ do
       --f :: [Tensor Value TVal] -> Build ControlNode
       --f params = TF.gradientDescent 0.01 params
       --minimize :: Tensor Build TVal	-> [Variable TVal]	-> Build ControlNode
-      minimize loss params = gradients loss params >>= TF.gradientDescent 0.01 params
+      --minimize loss params = gradients loss params >>= TF.gradientDescent 0.01 params
+      minimize params = fuckyeah params >>= TF.gradientDescent 0.01 params
 
       
-  trainStep <- minimize loss [u, v]
+  trainStep <- minimize [u, v]
   replicateM_ 1000 (TF.run trainStep)
 {-
   let graphDef = TF.asGraphDef $ sequence $ render <$> toList trainStep
@@ -148,6 +222,7 @@ fitMatrix = TF.runSession $ do
   liftIO $ print ((*) <$> u' <*> v')
 
 {-
+
 
 modify :: Storable a => (forall s. MVector s a -> ST s ()) -> Vector a -> Vector a
 
@@ -164,14 +239,7 @@ freeze :: MVector s e -> ST s (Vector e)
 
 {-
 
-thaw :: (Elt e, PrimMonad m) => Tensor d e -> m (MTensor (PrimState m) d e)
 
-freeze :: (Elt e, PrimMonad m) => MTensor (PrimState m) d e -> m (Tensor d e)
-
-
-newtype MTensor s d e = MTensor { unMTensor :: MVector s e } -- vector 
-newtype MTensor s d e = MTensor { unMTensor :: Variable e } -- tensorflow
- 
 readValue :: TensorType a => Variable a -> Tensor Build a
 
 data Variable a = Variable
@@ -191,17 +259,17 @@ renderValue (Tensor o) = render $ Tensor $ toBuild o
 expr :: TensorKind v => Tensor v a -> Tensor Build a
 expr (Tensor o) = Tensor $ toBuild o
 
--- TODO : unify gradBP2' and gradients 
-gradBP2'  :: (Backprop a, Backprop b, Backprop c) =>
-          (forall s. Reifies s W => BVar s a -> BVar s b -> BVar s c)
-          -> a -> b -> (a, b)
+
+
+type MT s d = MTensor s d TVal
+newtype MTensor s d e = MTensor { unMTensor :: MVector s e } -- vector 
+newtype MTensor s d e = MTensor { unMTensor :: Variable e } -- tensorflow
+
 
 
 -- TODO : ok to go : Tensor Value TVal -> Tensor Build TVal -> Tensor Value TVal ??
 -- renderValue . expr == id ??
-gradients :: PrimMonad m => Tensor d TVal -> [MTensor (PrimState m) d TVal] -> m [Tensor d TVal]
-
-gradients :: Tensor Build TVal -> [Variable TVal] -> Build [Tensor Value TVal]
+gradients2 :: PrimMonad m => Model -> [MT s d] -> ST s [T d]
 
 
 minimize :: Tensor Build TVal	-> [Variable TVal]	-> Build ControlNode
@@ -209,56 +277,12 @@ minimize loss params = TF.gradients loss params >>= f
   where  f :: [Tensor Value TVal] -> Build ControlNode
          f = gradientDescent 0.01 params
 
+newtype MT s a = MTensor { unMTensor :: TF.Variable a } 
+type T a = Tensor Build a
 
--- | Perform one step of the gradient descent algorithm.
-gradientDescent :: TVal -> [Variable TVal] -> [Tensor Value TVal] -> Build ControlNode
-gradientDescent learningRate params grads = TF.withNameScope "gradientDescent" $ do
-
-  let applyGrad param grad = TF.assignAdd param (TF.scalar (-learningRate) `TF.mul` grad) -- this in ST
-  TF.group =<< zipWithM applyGrad params grads
-
-
--- Var
-assignAdd :: (MonadBuild m, TensorType a) => Variable a -> Tensor v a -> m ControlNode
-
-assignAddVariableOp' :: forall v'1 v'2 dtype m' . (MonadBuild m',
-                                                   TensorType dtype) =>
-                        OpParams ->
-                        Tensor v'1 ResourceHandle -- ^ __resource__
-                        -> Tensor v'2 dtype -- ^ __value__
-                        -> m' (ControlNode)
-assignAddVariableOp' op'options resource value | eqLengthGuard [] =
-    build $ do
-        op'inputs <- fmap Prelude.concat $ Prelude.sequence [buildInputs resource,
-                                                             buildInputs value]
-        buildOp [] (opDef "AssignAddVariableOp"
-                    & opAttr "dtype" .~ tensorType (undefined :: dtype)
-                    & op'options & opInputs .~ op'inputs)
-
-assignAdd' :: forall v'2 t m' . (MonadBuild m',
-                                 OneOf '[(Data.Complex.Complex Double),
-                                         (Data.Complex.Complex Float),
-                                         Data.Int.Int16, Data.Int.Int32,
-                                         Data.Int.Int64, Data.Int.Int8,
-                                         Data.Word.Word16, Data.Word.Word32,
-                                         Data.Word.Word64, Data.Word.Word8,
-                                         Double, Float] t) => OpParams ->
-              Tensor Ref t -- ^ __ref__
-              -> Tensor v'2 t -- ^ __value__
-              -> m' (Tensor Ref t) -- ^ __output_ref__
-assignAdd' op'options ref value | eqLengthGuard [] =
-    build $ do
-        op'inputs <- fmap Prelude.concat $ Prelude.sequence [buildInputs ref,
-                                                             buildInputs value]
-        buildOp [] (opDef "AssignAdd"
-                    & opAttr "T" .~ tensorType (undefined :: t)
-                    & op'options & opInputs .~ op'inputs)
-
-
-- grok tf Variable, how is it like ST?
-- 
--
 -}
+
+
 {-
 squaredErrorGrad
     :: (Num p, Num b)
@@ -329,12 +353,49 @@ testGradientSimple = do
   return $ dx == V.fromList [6 :: Float] && db == V.fromList [1 :: Float] -- && expected == ops
 
 
+eval :: TF.Fetchable t a => t -> IO a
+eval = TF.runSession . TF.run
+
+
+minusP :: Tensor Build Float -> (Tensor Build Float, Tensor Build Float)
+       -> (Tensor Build Float, Tensor Build Float) 
+       -> (Tensor Build Float, Tensor Build Float)
+minusP eps (a,b) (c,d) = (a-eps*c, b-eps*d)
+
+
+doN 0 f x = f x
+doN n f x = let x' = f x in doN (n-1) f x'
+
+--testMatrix :: IO ()
+testMatrix = do
+  let ones = [1, 1, 1, 1] :: [Float]
+      matx = TF.constant [2, 2] ones
+
+      eps = TF.scalar (0.1 :: Float)
+      f x y = (constVar matx) `subD` (x `matMulD` y)
+      loss x y = myMeanD $ squareD $ f x y
+
+      trainStep (x,y) = minusP eps (x,y) $ gradBP2 loss x y --TODO use control nodes
+      u = TF.constant [2, 1] [0.9, 1.1]
+      v = TF.constant [1, 2] [1.5, 1.1]
+      g = doN 7 trainStep (u,v)
+      
+
+  let graphDef = TF.asGraphDef $ sequence $ render <$> toList g
+      ops = graphDef ^.. node . traverse . name
+      inps = graphDef ^.. node . traverse . input 
+  l <- traverse print $ zip ops inps
+  print $ length l
+
+  (u', v') <- eval g 
+  print $ V.toList (u' :: V.Vector Float)
+  print $ V.toList (v' :: V.Vector Float)
+  print $ ((*) <$> u' <*> v')
+  return ()
 
 
 
-type Model p a b = forall z. Reifies z W
-                => BVar z p
-                -> BVar z a
-                -> BVar z b
+
+
 
 

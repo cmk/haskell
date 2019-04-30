@@ -21,6 +21,7 @@
 module TensorFlow.Session (
     Session,
     SessionT,
+    SessionState,
     Options,
     sessionConfig,
     sessionTarget,
